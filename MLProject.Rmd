@@ -1,0 +1,167 @@
+---
+title: "Machine Learning with User Motion Data from Weightlifting"
+output: html_document
+---
+
+In this project, a large training set of user exercise motions was provided for use in classifying users' exercise behaviors. The objective was to use machine learning techniques taught in the Practical Machine Learning course to train a classifier that could perform successful classification on a provided test set, and to document the development of the classifier.
+
+## Executive Summary
+
+Training on the data using a random forest produced a classifier with an estimated out of bag error rate of less than 0.5%. It successfully classified all 20 samples in the test set.
+
+## Data
+
+Researchers collected data about users' motions during exercise. Each user was wearing Razor inertial measurement units on their weight belt, dumbbell, arm, and glove, which could provide 3-axis accelerometer, magnetometer, and gyroscope readings while working out.
+
+Users were then asked to perform bicep curls in 5 different manners, representing the correct approach and common mistakes:
+
+* A - Correct method
+* B - Throwing elbows to the front
+* C - Lifting the dumbbell only halfway
+* D - Lowering the dumbbell only halfway
+* E - Throwing the hips to the front
+
+Users were supervised by an experienced weight lifter to ensure that they were performing the desired motions.
+
+Motion data was collected and classified into the appropriate group. That motion data (available [online](http://groupware.les.inf.puc-rio.br/har)) was used for training and testing.
+
+```{r data, eval=FALSE}
+# Load data
+training <- read.csv("pml-training.csv")
+testing <- read.csv("pml-testing.csv")
+```
+
+## Cleaning
+
+The training data had 19622 observations of 160 variables. These variables included metadata from the IMUs and many statistics over different time windows for the users. The testing data did not include any of these statistics, so that information would not have been useful in classifying the 20 extra observations. We also desired to remove the metadata so that training would solely be based on the measurements.
+
+```{r clean, eval=FALSE}
+# Remove undesirable columns
+na_cols <- (grepl("kurtosis",colnames(testing)) |
+                grepl("skewness",colnames(testing)) |
+                grepl("var_",colnames(testing)) |
+                grepl("stddev_",colnames(testing)) |
+                grepl("avg_",colnames(testing)) |
+                grepl("max_",colnames(testing)) |
+                grepl("min_",colnames(testing)) |
+                grepl("amplitude_",colnames(testing)) |
+                grepl("timestamp",colnames(testing)) |
+                colnames(testing) == "new_window" |
+                colnames(testing) == "num_window" |
+                colnames(testing) == "X")
+                 
+training <- subset(training, select=-which(na_cols))
+testing <- subset(testing, select=-which(na_cols))
+```
+
+After removing these columns, there were 54 remaining variables. The first variable was the user's name, and the last was the class. The other 52 columns represented 13 different variables for the 4 different sensor locations. The 13 variables were:
+
+* Roll, Pitch, and Yaw
+* Gyroscope X, Y, and Z
+* Magnetometer X, Y, and Z
+* Accelerometer X, Y, and Z
+* Total Acceleration
+
+and the 4 sensor locations were:
+
+* Belt (lumbar belt)
+* Dumbbell
+* Arm
+* Forearm (glove)
+
+These 52 variables and the user's name were used as the inputs, with the class being the output.
+
+## Model
+
+Early experimentation with different machine learning approaches showed poor performance for a simple CART model. However, a bootstrapped random forest using just 5% of the training data was able to successfully classify well over 90% of the remaining training samples. This strongly indicated that a random forest model on a larger portion of the data would perform very well, though it could potentially take a long time to train.
+
+Other tests showed convergence of the performance before 100 trees were used, so it was not necessary to train the default 500 trees. Excellent performance was achieved with both bootstrapped samples and cross-validation. The final trained model used in the rest of this project included 5-fold cross-validation of the random forest classifier for estimation of out of bag error rates.
+
+Code for training the classifier is shown below:
+
+```{r model, eval=FALSE}
+# Train a Random Forest model with 5-fold cross validation
+library(caret)
+library(randomForest)
+
+set.seed(1000)
+
+train_control <- trainControl(method="cv", number=5)
+
+modelCV <- train(classe ~ .,
+                 method="rf",
+                 data=training,
+                 trControl=train_control,
+                 ntree=100)
+```
+
+```{r hiddenSave, eval=FALSE, echo=FALSE}
+# Data was saved when originally run
+saveRDS(training, file="training.rds")
+saveRDS(testing, file="testing.rds")
+saveRDS(modelCV, file="modelCV.rds")
+```
+
+```{r hiddenLoad, eval=TRUE, echo=FALSE}
+# Load the saved files
+training <- readRDS("training.rds")
+testing <- readRDS("testing.rds")
+modelCV <- readRDS("modelCV.rds")
+options(digits=4)
+```
+
+## Results
+
+Model parameters and results are provided below. The model chosen by the caret package selected an `mtry` parameter of 29, representing the number of predictors sampled for determining a best split at each node.
+```{r modelOutput}
+modelCV
+```
+
+The confusion matrix shows class error rates of below 1% for all 5 classes, including an error rate of below 0.1% for class A. Nearly all training samples were classified correctly using this classifier.
+```{r confusionMatrix}
+modelCV$finalModel$confusion
+```
+
+As the number of trees in the model increases, the out of bag error rate decreases. With 1 tree, it is close to 5%, and by 50 trees it is 0.5%. After 100 trees, it has converged to 0.45%. Since this estimate is based on samples in the training set that were not a part of the particular classifier being trained at that time, this implies that we should expect similarly excellent performance on the test set (expect 19.9 correct out of 20).
+```{r errRate}
+numTrees = c(1:5,(1:9)*10,96:100)
+errorRate <- cbind(numTrees=numTrees,modelCV$finalModel$err.rate[numTrees,])
+colnames(errorRate)[2] <- "OOBErrRate"
+errorRate
+```
+
+Random forests include as an output the importance of each variable in the classifier result. Each variable is randomly reordered one at a time to see how much the accuracy degrades due to that variable. High values show that a variable was important, while low values indicate that a variable had little effect on the result. The following chart indicates that some of the most important variables were the angle measurements on the forearm and belt as well as the magnetometer measurements on the dumbbell.
+
+```{r importance, echo=FALSE}
+library(ggplot2)
+
+importanceFrame <- as.data.frame(modelCV$finalModel$importance)
+importanceFrame$variable <- rownames(importanceFrame)
+importanceFrame <- importanceFrame[order(-importanceFrame$MeanDecreaseAccuracy),]
+
+p <- ggplot(importanceFrame[1:10,], aes(x=reorder(variable,MeanDecreaseAccuracy),
+                                        weight=MeanDecreaseAccuracy, 
+                                        fill=reorder(variable,MeanDecreaseAccuracy)))
+p <- p + geom_bar() + ggtitle("Top 10 Most Important Variables")
+p <- p + xlab("Variable") + ylab("Variable Importance (Mean Decrease in Accuracy)")
+p <- p + theme(axis.text.x=element_blank(),
+               axis.text.y=element_text(size=12,vjust=.3),
+               axis.title=element_text(size=16),
+               plot.title=element_text(size=18),
+               legend.position="none") 
+p+coord_flip()
+```
+
+## Prediction
+
+Ultimately, we were trying to predict the correct classification of the 20 measurements in the test set. The prediction is shown below:
+
+```{r prediction, message=FALSE}
+predict(modelCV, newdata=testing)
+```
+
+All 20 predictions were found to be correct. In looking at the estimated class probabilities underlying the predictions, no incorrect class ever had an estimated probability of more than 10%, and they were usually in the low single digits. This classifier confidently and correctly classified all of the samples, and was not overtuned to the training data.
+
+```{r predictionProb, message=FALSE}
+predict(modelCV, newdata=testing, type="prob")
+```
